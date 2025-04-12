@@ -59,13 +59,13 @@ type Property struct {
 	Visibility                    string         `json:"visibility"`
 	Views                         int            `json:"views"`
 
-	Location Location `gorm:"foreignKey:PropertyID"`
+	Location Location 
 
 	AgentID *uint `json:"-"`
 	Agent   Agent `gorm:"foreignKey:AgentID"`
 
 
-	CoverPhoto CoverPhoto `gorm:"foreignKey:PropertyID"` 
+	CoverPhoto CoverPhoto  
 
 
 }

@@ -146,85 +146,68 @@ func (s *SyncService) FetchAndSyncProperties() (*schema.SyncResult, error) {
 // syncSingleProperty handles the logic for checking and inserting/updating one property and its relations.
 // Returns gorm.ErrRecordNotFound if the property already exists (used as a signal to skip).
 func (s *SyncService) syncSingleProperty(extProp *schema.ExternalProperty) error {
-	// 1. Check if Property already exists by ID
-	var existingProperty models.Property
-	err := s.DB.Select("id").First(&existingProperty, extProp.ID).Error
-	if err == nil {
-		// Property found, return the specific error to signal skipping
-		return gorm.ErrRecordNotFound // Using this standard GORM error for convenience
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		// An actual DB error occurred during the check
-		return fmt.Errorf("failed to check for existing property: %w", err)
-	}
+    // Check if Property already exists by ID
+    var existingProperty models.Property
+    err := s.DB.Select("id").First(&existingProperty, extProp.ID).Error
+    if err == nil {
+        return gorm.ErrRecordNotFound // Property found, signal skip
+    } else if !errors.Is(err, gorm.ErrRecordNotFound) {
+        return fmt.Errorf("failed to check for existing property: %w", err)
+    }
 
-	// 2. Property does not exist, proceed with potential upserts of related data and insertion.
-	// Use a transaction to ensure atomicity
-	return s.DB.Transaction(func(tx *gorm.DB) error {
-		var mappedUser *models.User
-		var mappedAgent *models.Agent
-		// var _ *models.Location
-		var mappedCoverPhoto *models.CoverPhoto
-		var txErr error
+    // Use a transaction
+    return s.DB.Transaction(func(tx *gorm.DB) error {
+        var mappedUser *models.User
+        var mappedAgent *models.Agent
+        var txErr error
 
-		// --- Upsert User (if agent and user exist) ---
-		if extProp.Agent != nil && extProp.Agent.User != nil {
-			mappedUser, txErr = s.upsertUser(tx, extProp.Agent.User)
-			if txErr != nil {
-				return fmt.Errorf("failed to upsert user %d for property %d: %w", extProp.Agent.User.ID, extProp.ID, txErr)
-			}
-		}
+        // --- Upsert User and Agent first (these don't depend on Property) ---
+        if extProp.Agent != nil && extProp.Agent.User != nil {
+            mappedUser, txErr = s.upsertUser(tx, extProp.Agent.User)
+            if txErr != nil {
+                return fmt.Errorf("failed to upsert user %d for property %d: %w", extProp.Agent.User.ID, extProp.ID, txErr)
+            }
 
-		// --- Upsert Agent (if agent exists and user upsert was successful or not needed) ---
-		if extProp.Agent != nil && mappedUser != nil { // Requires user to be processed first
-			mappedAgent, txErr = s.upsertAgent(tx, extProp.Agent, mappedUser.ID)
-			if txErr != nil {
-				return fmt.Errorf("failed to upsert agent %d for property %d: %w", extProp.Agent.ID, extProp.ID, txErr)
-			}
-		}
+            if mappedUser != nil {
+                mappedAgent, txErr = s.upsertAgent(tx, extProp.Agent, mappedUser.ID)
+                if txErr != nil {
+                    return fmt.Errorf("failed to upsert agent %d for property %d: %w", extProp.Agent.ID, extProp.ID, txErr)
+                }
+            }
+        }
 
-		// --- Upsert Location (if exists) ---
-		// Note: Location ID seems tied to Property ID in the example, adjust if it can be independent
-		if extProp.Location != nil {
-			// Enforce that Location.PropertyID matches the property being inserted
-			extProp.Location.PropertyID = extProp.ID
-			_, txErr = s.upsertLocation(tx, extProp.Location)
-			if txErr != nil {
-				return fmt.Errorf("failed to upsert location %d for property %d: %w", extProp.Location.ID, extProp.ID, txErr)
-			}
-		}
+        // --- Upsert Cover Photo that doesn't depend on Property ---
+        var mappedCoverPhoto *models.CoverPhoto
+        if extProp.CoverPhoto != nil {
+            mappedCoverPhoto, txErr = s.upsertCoverPhoto(tx, extProp.CoverPhoto)
+            if txErr != nil {
+                return fmt.Errorf("failed to upsert cover photo %d for property %d: %w", extProp.CoverPhoto.ID, extProp.ID, txErr)
+            }
+        }
 
-		// --- Upsert Cover Photo (if exists) ---
-		if extProp.CoverPhoto != nil {
-			// We need to link CoverPhoto to the Property. Since Property doesn't exist yet,
-			// we map the cover photo data but defer linking until Property is created.
-			// Alternatively, create CoverPhoto without PropertyID, then update it.
-			// Simpler: Assume CoverPhoto ID is globally unique or handle potential conflicts.
-			mappedCoverPhoto, txErr = s.upsertCoverPhoto(tx, extProp.CoverPhoto)
-			if txErr != nil {
-				return fmt.Errorf("failed to upsert cover photo %d for property %d: %w", extProp.CoverPhoto.ID, extProp.ID, txErr)
-			}
-		}
+        // --- Map and Create Property first ---
+        dbProperty, mapErr := mapExternalToDBProperty(extProp, mappedAgent, mappedCoverPhoto)
+        if mapErr != nil {
+            return fmt.Errorf("failed to map external property %d to db model: %w", extProp.ID, mapErr)
+        }
 
-		// --- Map ExternalProperty to models.Property ---
-		dbProperty, mapErr := mapExternalToDBProperty(extProp, mappedAgent, mappedCoverPhoto) // Pass mapped related objects
-		if mapErr != nil {
-			return fmt.Errorf("failed to map external property %d to db model: %w", extProp.ID, mapErr)
-		}
+        // Create the property without associations
+        result := tx.Omit(clause.Associations).Create(&dbProperty)
+        if result.Error != nil {
+            return fmt.Errorf("failed to create property %d: %w", dbProperty.ID, result.Error)
+        }
 
-		// --- Create Property ---
-		// We already checked for existence outside the transaction.
-		// Explicitly set the ID from the external source.
-		// Omit relations that are managed via Foreign Keys (AgentID, potentially CoverPhotoID if added)
-		// Location is HasOne, GORM handles it if dbProperty.Location is set (but we upserted separately).
-		// CoverPhoto is HasOne, handled similarly.
-		result := tx.Omit(clause.Associations).Create(&dbProperty)
-		if result.Error != nil {
-			return fmt.Errorf("failed to create property %d: %w", dbProperty.ID, result.Error)
-		}
+        // --- Now that property exists, upsert Location ---
+        if extProp.Location != nil {
+            extProp.Location.PropertyID = extProp.ID
+            _, txErr = s.upsertLocation(tx, extProp.Location)
+            if txErr != nil {
+                return fmt.Errorf("failed to upsert location %d for property %d: %w", extProp.Location.ID, extProp.ID, txErr)
+            }
+        }
 
-
-		return nil // Commit transaction
-	}) // End Transaction
+        return nil
+    })
 }
 
 // Helper to parse string dates from API (adjust format if needed)

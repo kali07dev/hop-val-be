@@ -1,0 +1,9 @@
+# config/config.yaml
+database:
+  host: localhost
+  port: 5432
+  user: your_db_user
+  password: your_db_password
+  dbname: database_name
+  sslmode: disable 
+  timezone: UTC

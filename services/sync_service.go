@@ -161,32 +161,28 @@ func (s *SyncService) syncSingleProperty(extProp *schema.ExternalProperty) error
         var mappedAgent *models.Agent
         var txErr error
 
-        // --- Upsert User and Agent first (these don't depend on Property) ---
+        // --- First phase: Process entities that don't depend on Property ---
+        
+        // Upsert User (doesn't depend on Property)
         if extProp.Agent != nil && extProp.Agent.User != nil {
             mappedUser, txErr = s.upsertUser(tx, extProp.Agent.User)
             if txErr != nil {
                 return fmt.Errorf("failed to upsert user %d for property %d: %w", extProp.Agent.User.ID, extProp.ID, txErr)
             }
-
-            if mappedUser != nil {
-                mappedAgent, txErr = s.upsertAgent(tx, extProp.Agent, mappedUser.ID)
-                if txErr != nil {
-                    return fmt.Errorf("failed to upsert agent %d for property %d: %w", extProp.Agent.ID, extProp.ID, txErr)
-                }
-            }
         }
 
-        // --- Upsert Cover Photo that doesn't depend on Property ---
-        var mappedCoverPhoto *models.CoverPhoto
-        if extProp.CoverPhoto != nil {
-            mappedCoverPhoto, txErr = s.upsertCoverPhoto(tx, extProp.CoverPhoto)
+        // Upsert Agent (doesn't depend on Property)
+        if extProp.Agent != nil && mappedUser != nil {
+            mappedAgent, txErr = s.upsertAgent(tx, extProp.Agent, mappedUser.ID)
             if txErr != nil {
-                return fmt.Errorf("failed to upsert cover photo %d for property %d: %w", extProp.CoverPhoto.ID, extProp.ID, txErr)
+                return fmt.Errorf("failed to upsert agent %d for property %d: %w", extProp.Agent.ID, extProp.ID, txErr)
             }
         }
 
-        // --- Map and Create Property first ---
-        dbProperty, mapErr := mapExternalToDBProperty(extProp, mappedAgent, mappedCoverPhoto)
+        // --- Second phase: Create the Property ---
+        
+        // Map external property data to DB model (without setting relationships yet)
+        dbProperty, mapErr := mapExternalToDBProperty(extProp, mappedAgent, nil) // Pass nil for coverPhoto
         if mapErr != nil {
             return fmt.Errorf("failed to map external property %d to db model: %w", extProp.ID, mapErr)
         }
@@ -197,13 +193,25 @@ func (s *SyncService) syncSingleProperty(extProp *schema.ExternalProperty) error
             return fmt.Errorf("failed to create property %d: %w", dbProperty.ID, result.Error)
         }
 
-        // --- Now that property exists, upsert Location ---
+        // --- Third phase: Create entities that depend on Property ---
+        
+        // Now that property exists, upsert Location
         if extProp.Location != nil {
             extProp.Location.PropertyID = extProp.ID
             _, txErr = s.upsertLocation(tx, extProp.Location)
             if txErr != nil {
                 return fmt.Errorf("failed to upsert location %d for property %d: %w", extProp.Location.ID, extProp.ID, txErr)
             }
+        }
+
+        // Now that property exists, upsert CoverPhoto
+        if extProp.CoverPhoto != nil {
+
+            _, txErr := s.upsertCoverPhoto(tx, extProp.CoverPhoto)
+            if txErr != nil {
+                return fmt.Errorf("failed to upsert cover photo %d for property %d: %w", extProp.CoverPhoto.ID, extProp.ID, txErr)
+            }
+            
         }
 
         return nil

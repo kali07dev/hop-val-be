@@ -7,3 +7,6 @@ database:
   dbname: database_name
   sslmode: disable 
   timezone: UTC
+
+external_api:
+  properties_url: "https://your_api_endpoint_here/api/v1/"

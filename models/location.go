@@ -4,7 +4,7 @@ import "time"
 
 type Location struct {
 	ID            uint      `gorm:"primaryKey" json:"id"`
-	PropertyID    uint      `gorm:"uniqueIndex" json:"property_id"` // Foreign Key & Unique ensures One-to-One
+	PropertyID    uint      `gorm:json:"property_id"` // Foreign Key & Unique ensures One-to-One
 	Region        string    `json:"region"`
 	District      string    `json:"district"`
 	Area          string    `json:"area"`
